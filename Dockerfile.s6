@@ -8,11 +8,32 @@ RUN mkdir -p /config /database /srv && \
   chown -R abc:abc /config /database /srv
 
 # Copy files and set permissions
-COPY filebrowser /bin/filebrowser
+COPY --chown=abc:abc filebrowser /bin/filebrowser
 COPY docker/common/ /
 COPY docker/s6/ /
 
-RUN chown -R abc:abc /bin/filebrowser /defaults healthcheck.sh && \
+# Two guards, for the two ways a non-Linux checkout breaks this image:
+#
+#   * `filebrowser` comes from the build context, and a binary assembled on
+#     Windows carries no execute bit — Docker copies the mode through and the
+#     container fails with "exec /bin/filebrowser: permission denied".
+#   * The service definitions below are shell scripts. Checked out with CRLF
+#     their shebang names an interpreter that does not exist, and s6 reports only
+#     "No such file or directory" about a file that is plainly there. A Windows
+#     checkout gets CRLF whatever the attributes say, because core.autocrlf
+#     overrides eol=lf, so the build normalises them itself.
+#
+# This image is a single stage, so unlike the plain Dockerfile there is nowhere
+# to fix the binary's mode that does not re-add its 35 MB to a later layer.
+# `COPY --chmod=0755` would do it in one layer but requires BuildKit; if you
+# build this variant with BuildKit, prefer that and drop the chmod below.
+RUN chown -R abc:abc /defaults healthcheck.sh && \
+  sed -i 's/\r$//' /healthcheck.sh \
+    /custom-cont-init.d/20-config \
+    /etc/services.d/filebrowser/run && \
+  chmod +x /bin/filebrowser /healthcheck.sh \
+    /custom-cont-init.d/20-config \
+    /etc/services.d/filebrowser/run && \
   setcap 'cap_net_bind_service=+ep' /bin/filebrowser
 
 # Define healthcheck script
