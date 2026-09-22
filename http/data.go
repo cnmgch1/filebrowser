@@ -25,6 +25,11 @@ type data struct {
 	user     *users.User
 	raw      interface{}
 
+	// sessionKey is the client's session key, when it supplied one. It is set
+	// from the login envelope or recovered from a v2 credential, and is what
+	// lets a token be handed back encrypted. See session.go.
+	sessionKey []byte
+
 	// checkerPrefix is prepended to every path before evaluating rules. It is
 	// set when the user's filesystem has been rebased onto a subdirectory (as
 	// done for public shares), so that rules — which are relative to the user's
@@ -97,10 +102,11 @@ func handle(fn handleFunc, prefix string, store *storage.Storage, server *settin
 		}
 
 		status, err := fn(w, r, &data{
-			Runner:   &runner.Runner{Enabled: server.EnableExec, Settings: settings},
-			store:    store,
-			settings: settings,
-			server:   server,
+			Runner:     &runner.Runner{Enabled: server.EnableExec, Settings: settings},
+			store:      store,
+			settings:   settings,
+			server:     server,
+			sessionKey: sessionKeyFromContext(r.Context()),
 		})
 
 		if status >= 400 || err != nil {

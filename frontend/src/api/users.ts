@@ -11,12 +11,15 @@ export async function get(id: number) {
 export async function create(user: IUser, currentPassword: string) {
   const res = await fetchURL(`/api/users`, {
     method: "POST",
-    body: JSON.stringify({
-      what: "user",
-      which: [],
-      current_password: currentPassword,
-      data: user,
-    }),
+    encryptedBody: {
+      scope: "users",
+      payload: {
+        what: "user",
+        which: [],
+        current_password: currentPassword,
+        data: user,
+      },
+    },
   });
 
   if (res.status === 201) {
@@ -33,12 +36,15 @@ export async function update(
 ) {
   await fetchURL(`/api/users/${user.id}`, {
     method: "PUT",
-    body: JSON.stringify({
-      what: "user",
-      which: which,
-      ...(currentPassword != null ? { current_password: currentPassword } : {}),
-      data: user,
-    }),
+    encryptedBody: {
+      scope: "users",
+      payload: {
+        what: "user",
+        which: which,
+        ...(currentPassword != null ? { current_password: currentPassword } : {}),
+        data: user,
+      },
+    },
   });
 }
 
@@ -48,8 +54,11 @@ export async function remove(
 ) {
   await fetchURL(`/api/users/${id}`, {
     method: "DELETE",
-    body: JSON.stringify({
-      ...(currentPassword != null ? { current_password: currentPassword } : {}),
-    }),
+    encryptedBody: {
+      scope: "users",
+      payload: {
+        ...(currentPassword != null ? { current_password: currentPassword } : {}),
+      },
+    },
   });
 }

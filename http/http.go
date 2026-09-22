@@ -36,6 +36,9 @@ func NewHandler(
 			next.ServeHTTP(w, r)
 		})
 	})
+	// Turns the client's session credential into the plain JWT everything below
+	// already understands; see session.go.
+	r.Use(credentialMiddleware(store))
 	index, static := getStaticHandlers(store, server, assetsFs)
 
 	monkey := func(fn handleFunc, prefix string) http.Handler {
@@ -49,16 +52,22 @@ func NewHandler(
 	api := r.PathPrefix("/api").Subrouter()
 
 	tokenExpirationTime := server.GetTokenExpirationTime(DefaultTokenExpirationTime)
-	api.Handle("/login", monkey(loginHandler(tokenExpirationTime), ""))
-	api.Handle("/signup", monkey(signupHandler, ""))
+
+	// Handshake for clients that encrypt their credentials; see credcrypt.go.
+	api.Handle("/crypto/handshake", monkey(cryptoHandshakeHandler(), "")).Methods("POST")
+
+	// Every endpoint that accepts a password is wrapped so a client may send an
+	// encrypted envelope in place of the plaintext body.
+	api.Handle("/login", monkey(withEncryptedCredentials(scopeLogin, loginHandler(tokenExpirationTime)), ""))
+	api.Handle("/signup", monkey(withEncryptedCredentials(scopeSignup, signupHandler), ""))
 	api.Handle("/renew", monkey(renewHandler(tokenExpirationTime), ""))
 
 	users := api.PathPrefix("/users").Subrouter()
 	users.Handle("", monkey(usersGetHandler, "")).Methods("GET")
-	users.Handle("", monkey(userPostHandler, "")).Methods("POST")
-	users.Handle("/{id:[0-9]+}", monkey(userPutHandler, "")).Methods("PUT")
+	users.Handle("", monkey(withEncryptedCredentials(scopeUsers, userPostHandler), "")).Methods("POST")
+	users.Handle("/{id:[0-9]+}", monkey(withEncryptedCredentials(scopeUsers, userPutHandler), "")).Methods("PUT")
 	users.Handle("/{id:[0-9]+}", monkey(userGetHandler, "")).Methods("GET")
-	users.Handle("/{id:[0-9]+}", monkey(userDeleteHandler, "")).Methods("DELETE")
+	users.Handle("/{id:[0-9]+}", monkey(withEncryptedCredentials(scopeUsers, userDeleteHandler), "")).Methods("DELETE")
 
 	api.PathPrefix("/resources/recursive").Handler(monkey(resourceGetRecursiveHandler, "/api/resources/recursive")).Methods("GET")
 	api.PathPrefix("/resources").Handler(monkey(resourceGetHandler, "/api/resources")).Methods("GET")
@@ -76,7 +85,7 @@ func NewHandler(
 
 	api.Handle("/shares", monkey(shareListHandler, "")).Methods("GET")
 	api.PathPrefix("/share").Handler(monkey(shareGetsHandler, "/api/share")).Methods("GET")
-	api.PathPrefix("/share").Handler(monkey(sharePostHandler, "/api/share")).Methods("POST")
+	api.PathPrefix("/share").Handler(monkey(withEncryptedCredentials(scopeShare, sharePostHandler), "/api/share")).Methods("POST")
 	api.PathPrefix("/share").Handler(monkey(shareDeleteHandler, "/api/share")).Methods("DELETE")
 
 	api.Handle("/settings", monkey(settingsGetHandler, "")).Methods("GET")

@@ -44,26 +44,23 @@ type authToken struct {
 	jwt.RegisteredClaims
 }
 
-type extractor []string
-
-func (e extractor) ExtractToken(r *http.Request) (string, error) {
+// authValue returns the JWT the request carries in its header, or "" when it
+// carries none.
+//
+// The `auth` cookie deliberately is not consulted here: it holds a short-lived
+// media credential, not a JWT, and that credential is only ever accepted for the
+// endpoints the browser loads by itself. See session.go.
+func authValue(r *http.Request) string {
 	token, _ := request.HeaderExtractor{"X-Auth"}.ExtractToken(r)
 
-	// Checks if the token isn't empty and if it contains two dots.
-	// The former prevents incompatibility with URLs that previously
-	// used basic auth.
-	if token != "" && strings.Count(token, ".") == 2 {
-		return token, nil
+	// A JWT is the only thing that may pass: anything else that could appear in
+	// the header — a stray Basic credential, a session identifier — is not one,
+	// and treating it as one would only produce confusing parse errors.
+	if strings.Count(token, ".") != 2 {
+		return ""
 	}
 
-	if r.Method == http.MethodGet {
-		cookie, _ := r.Cookie("auth")
-		if cookie != nil && strings.Count(cookie.Value, ".") == 2 {
-			return cookie.Value, nil
-		}
-	}
-
-	return "", request.ErrNoTokenInRequest
+	return token
 }
 
 func renewableErr(err error, r *http.Request, d *data, tk *authToken) bool {
@@ -121,9 +118,21 @@ func withUser(fn handleFunc) handleFunc {
 
 		var tk authToken
 		p := jwt.NewParser(jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithExpirationRequired())
-		token, err := request.ParseFromRequest(r, &extractor{}, keyFunc, request.WithClaims(&tk), request.WithParser(p))
-		if (err != nil || !token.Valid) && !renewableErr(err, r, d, &tk) {
-			return http.StatusUnauthorized, nil
+
+		var (
+			token *jwt.Token
+			err   error
+		)
+		if raw := authValue(r); raw != "" {
+			token, err = p.ParseWithClaims(raw, &tk, keyFunc)
+		} else {
+			err = request.ErrNoTokenInRequest
+		}
+
+		if err != nil || token == nil || !token.Valid {
+			if !renewableErr(err, r, d, &tk) {
+				return mediaOrUnauthorized(w, r, d, fn)
+			}
 		}
 
 		expiresSoon := tk.ExpiresAt != nil && time.Until(tk.ExpiresAt.Time) < time.Hour
@@ -133,14 +142,43 @@ func withUser(fn handleFunc) handleFunc {
 			w.Header().Add("X-Renew-Token", "true")
 		}
 
-		d.user, err = d.store.Users.Get(d.server.Root, d.server.FollowExternalSymlinks, tk.User.ID)
+		user, err := d.store.Users.Get(d.server.Root, d.server.FollowExternalSymlinks, tk.User.ID)
 		if err != nil {
 			return http.StatusInternalServerError, err
 		}
+		d.user = user
+
+		// Every authenticated reply reissues the media cookie, so its short
+		// lifetime only ever expires after genuine idleness.
+		setMediaCredential(w, d.settings.Key, user.ID)
 
 		canonicalizeRequestPath(r)
 		return fn(w, r, d)
 	}
+}
+
+// mediaOrUnauthorized is the way in for the requests the browser issues itself.
+//
+// A thumbnail, a video stream or a download opened in a new tab cannot carry a
+// header, so the only credential it can present is the media cookie — resolved
+// by the middleware into a user on the request context. Anything else is turned
+// away as before.
+func mediaOrUnauthorized(w http.ResponseWriter, r *http.Request, d *data, fn handleFunc) (int, error) {
+	userID, ok := mediaUserFromContext(r.Context())
+	if !ok {
+		return http.StatusUnauthorized, nil
+	}
+
+	user, err := d.store.Users.Get(d.server.Root, d.server.FollowExternalSymlinks, userID)
+	if err != nil {
+		return http.StatusUnauthorized, nil
+	}
+	d.user = user
+
+	setMediaCredential(w, d.settings.Key, user.ID)
+
+	canonicalizeRequestPath(r)
+	return fn(w, r, d)
 }
 
 func withAdmin(fn handleFunc) handleFunc {
@@ -276,6 +314,30 @@ func printToken(w http.ResponseWriter, _ *http.Request, d *data, user *users.Use
 	signed, err := token.SignedString(d.settings.Key)
 	if err != nil {
 		return http.StatusInternalServerError, err
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+
+	// The cookie the browser will present on the requests it issues itself. It
+	// is issued here because login is the first place a user is known.
+	setMediaCredential(w, d.settings.Key, user.ID)
+
+	// A client that sent a session key gets its token encrypted. That is what
+	// keeps the JWT off the wire entirely: the login response would otherwise
+	// hand an eavesdropper the very bearer token the credential scheme exists to
+	// hide. Clients that sent no session key — the CLI, curl, third-party
+	// clients — keep getting the plaintext token they have always had.
+	if len(d.sessionKey) > 0 {
+		body, err := sealSessionReply(d.settings.Key, d.sessionKey, signed)
+		if err != nil {
+			return http.StatusInternalServerError, err
+		}
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if _, err := w.Write(body); err != nil {
+			return http.StatusInternalServerError, err
+		}
+		return 0, nil
 	}
 
 	w.Header().Set("Content-Type", "text/plain")

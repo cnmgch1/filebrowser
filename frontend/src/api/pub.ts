@@ -7,7 +7,17 @@ export async function fetch(url: string, password: string = "") {
   const res = await fetchURL(
     `/api/public/share${url}`,
     {
-      headers: { "X-SHARE-PASSWORD": encodeURIComponent(password) },
+      // A share's password is a credential as well, so it is sent encrypted and
+      // never in the clear.
+      ...(password !== ""
+        ? {
+            encryptedHeader: {
+              name: "X-SHARE-PASSWORD",
+              scope: "share-unlock" as CredentialScope,
+              value: password,
+            },
+          }
+        : {}),
     },
     false
   );

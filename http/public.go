@@ -137,6 +137,27 @@ var publicDlHandler = withHashFile(func(w http.ResponseWriter, r *http.Request, 
 	return rawDirHandler(w, r, d, file)
 })
 
+// sharePasswordHeader carries a share's password. A client may send it either
+// literally or as an encrypted envelope prefixed with "enc:", so that the
+// password is not readable by anyone watching the connection.
+const sharePasswordHeader = "X-SHARE-PASSWORD"
+
+// sharePasswordFromRequest returns the password supplied for a share, or "" when
+// none was. An encrypted value is decrypted first; a literal one is
+// query-unescaped as before.
+func sharePasswordFromRequest(r *http.Request) (string, error) {
+	raw := r.Header.Get(sharePasswordHeader)
+	if raw == "" {
+		return "", nil
+	}
+
+	if password, encrypted, err := openValue(scopeShareUnlock, raw); encrypted {
+		return password, err
+	}
+
+	return url.QueryUnescape(raw)
+}
+
 func authenticateShareRequest(r *http.Request, l *share.Link) (int, error) {
 	if l.PasswordHash == "" {
 		return 0, nil
@@ -146,10 +167,9 @@ func authenticateShareRequest(r *http.Request, l *share.Link) (int, error) {
 		return 0, nil
 	}
 
-	password := r.Header.Get("X-SHARE-PASSWORD")
-	password, err := url.QueryUnescape(password)
+	password, err := sharePasswordFromRequest(r)
 	if err != nil {
-		return 0, err
+		return credentialStatus(err), err
 	}
 	if password == "" {
 		return http.StatusUnauthorized, nil

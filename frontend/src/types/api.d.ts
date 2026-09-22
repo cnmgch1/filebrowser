@@ -6,11 +6,32 @@ type ApiContent =
   | Pick<ReadableStreamDefaultReader<any>, "read">
   | "";
 
+/**
+ * An operation that carries a credential and therefore has an encrypted form.
+ * Must stay in step with the scope list in the Go package `credcrypt` and with
+ * `credentialScopes` in `http/credcrypt.go`.
+ */
+type CredentialScope =
+  | "login"
+  | "signup"
+  | "users"
+  | "share"
+  | "share-unlock";
+
 interface ApiOpts {
   method?: ApiMethod;
   headers?: object;
   body?: any;
   signal?: AbortSignal;
+  /**
+   * Send `payload` as an encrypted body instead of `body`, so the credential it
+   * carries is not readable on the wire. See @/utils/credcrypt.
+   */
+  encryptedBody?: { scope: CredentialScope; payload: unknown };
+  /**
+   * Send `value` as an encrypted header instead of a literal one.
+   */
+  encryptedHeader?: { name: string; scope: CredentialScope; value: string };
 }
 
 interface TusSettings {

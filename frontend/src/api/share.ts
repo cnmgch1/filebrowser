@@ -26,17 +26,20 @@ export async function create(
   if (expires !== "") {
     url += `?expires=${expires}&unit=${unit}`;
   }
-  let body = "{}";
-  if (password != "" || expires !== "" || unit !== "hours") {
-    body = JSON.stringify({
-      password: password,
-      expires: expires.toString(), // backend expects string not number
-      unit: unit,
-    });
-  }
+  // The body is always sent, even when it carries nothing but defaults: the
+  // handler decodes it and rejects a request with no body at all.
   return fetchJSON(url, {
     method: "POST",
-    body: body,
+    // The share password is a credential too, so it travels in an envelope
+    // rather than in a readable body. See @/utils/credcrypt.
+    encryptedBody: {
+      scope: "share",
+      payload: {
+        password: password,
+        expires: expires.toString(), // backend expects string not number
+        unit: unit,
+      },
+    },
   });
 }
 

@@ -3,16 +3,26 @@ import router from "@/router";
 import type { JwtPayload } from "jwt-decode";
 import { jwtDecode } from "jwt-decode";
 import { authMethod, baseURL, noAuth, logoutPage } from "./constants";
-import { StatusError } from "@/api/utils";
+import { fetchURL, StatusError } from "@/api/utils";
 import { setSafeTimeout } from "@/api/utils";
+import {
+  buildCredential,
+  clearCredentialMaterial,
+  credentialMaterial,
+  generateSessionKey,
+  readTokenReply,
+  storeCredentialMaterial,
+} from "./credcrypt";
 
-export function parseToken(token: string) {
+export function parseToken(token: string, sealedKey = "", sessionKey = "") {
   // falsy or malformed jwt will throw InvalidTokenError
   const data = jwtDecode<JwtPayload & { user: IUser }>(token);
 
-  document.cookie = `auth=${token}; Path=/; SameSite=Strict;`;
-
-  localStorage.setItem("jwt", token);
+  // The `auth` cookie is issued by the server, not written here. It holds a
+  // short-lived, opaque media credential rather than the token itself, so
+  // putting the token in it — as this used to — would hand an eavesdropper a
+  // two hour account credential from any thumbnail request. See http/session.go.
+  storeCredentialMaterial({ jwt: token, sealedKey, sessionKey });
 
   const authStore = useAuthStore();
   authStore.jwt = token;
@@ -53,40 +63,52 @@ export async function login(
   password: string,
   recaptcha: string
 ) {
-  const data = { username, password, recaptcha };
+  // A fresh session key per login: the reply is encrypted under it, and every
+  // later request proves possession of it instead of presenting the token.
+  const sessionKey = generateSessionKey();
 
-  const res = await fetch(`${baseURL}/api/login`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+  // The credentials go inside an envelope, so the password is not readable by
+  // anyone watching the connection. See @/utils/credcrypt.
+  const res = await fetchURL(
+    "/api/login",
+    {
+      method: "POST",
+      encryptedBody: {
+        scope: "login",
+        payload: { username, password, recaptcha, sessionKey },
+      },
     },
-    body: JSON.stringify(data),
-  });
+    false
+  );
 
   const body = await res.text();
+  const reply = readTokenReply(res.headers.get("Content-Type"), body, sessionKey);
 
-  if (res.status === 200) {
-    parseToken(body);
-  } else {
-    throw new StatusError(
-      body || `${res.status} ${res.statusText}`,
-      res.status
-    );
-  }
+  parseToken(reply.token, reply.sealedKey, sessionKey);
 }
 
 export async function renew(jwt: string) {
+  const material = credentialMaterial();
+  const credential = buildCredential("POST", { ...material, jwt: material.jwt || jwt });
+
   const res = await fetch(`${baseURL}/api/renew`, {
     method: "POST",
     headers: {
-      "X-Auth": jwt,
+      "X-Auth": credential,
     },
   });
 
   const body = await res.text();
 
   if (res.status === 200) {
-    parseToken(body);
+    // The reply is encrypted with the session key we already hold, so we can
+    // read it without a handshake.
+    const reply = readTokenReply(
+      res.headers.get("Content-Type"),
+      body,
+      material.sessionKey
+    );
+    parseToken(reply.token, reply.sealedKey, material.sessionKey);
   } else {
     throw new StatusError(
       body || `${res.status} ${res.statusText}`,
@@ -96,23 +118,17 @@ export async function renew(jwt: string) {
 }
 
 export async function signup(username: string, password: string) {
-  const data = { username, password };
-
-  const res = await fetch(`${baseURL}/api/signup`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+  await fetchURL(
+    "/api/signup",
+    {
+      method: "POST",
+      encryptedBody: {
+        scope: "signup",
+        payload: { username, password },
+      },
     },
-    body: JSON.stringify(data),
-  });
-
-  if (res.status !== 200) {
-    const body = await res.text();
-    throw new StatusError(
-      body || `${res.status} ${res.statusText}`,
-      res.status
-    );
-  }
+    false
+  );
 }
 
 export function logout(reason?: string) {
@@ -121,7 +137,7 @@ export function logout(reason?: string) {
   const authStore = useAuthStore();
   authStore.clearUser();
 
-  localStorage.setItem("jwt", "");
+  clearCredentialMaterial();
   if (noAuth) {
     window.location.reload();
   } else if (logoutPage !== "/login") {
