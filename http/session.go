@@ -55,7 +55,15 @@ const (
 	credentialNonceSize = 12
 	// credentialWindow is how far a credential's timestamp may be from the
 	// server's clock. It only has to cover clock drift and queueing.
-	credentialWindow = 60 * time.Second
+	//
+	// 300s rather than a tighter minute because a minute is not enough in the
+	// deployments this actually runs in: a box with no DNS and no public NTP
+	// silently drifts, and one that does sync often syncs to a gateway that is
+	// itself tens of seconds off. At 60s such a client is rejected on every
+	// request, which surfaces as a broken UI rather than as a clock problem.
+	// Widening this costs little — replay is stopped by the nonce table, not by
+	// the timestamp, so this only bounds how old a credential may be.
+	credentialWindow = 300 * time.Second
 	// maxRememberedNonces bounds the replay table. Reaching it drops the oldest
 	// entries, which weakens replay detection rather than breaking requests.
 	maxRememberedNonces = 1 << 16

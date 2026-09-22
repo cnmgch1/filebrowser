@@ -1,6 +1,7 @@
 package fbhttp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -111,8 +112,16 @@ func stripPrefix(prefix string, h http.Handler) http.Handler {
 		// If the path is exactly the prefix (no trailing slash), redirect to
 		// the prefix with a trailing slash so the router receives "/" instead
 		// of "", which would otherwise cause a redirect to the site root.
+		//
+		// The Location is rebuilt from everything stripped so far plus the path
+		// as it stands here, never from `prefix` alone. By the time a route's
+		// own stripPrefix runs, the base URL has already been taken off the
+		// path, so `prefix` is only the tail — a Location built from it would
+		// drop the base URL and send a client that reached us through a
+		// reverse proxy mounted under that prefix to a path the proxy does not
+		// route here at all.
 		if p == "" {
-			http.Redirect(w, r, prefix+"/", http.StatusMovedPermanently)
+			http.Redirect(w, r, strippedPrefix(r.Context())+r.URL.Path+"/", http.StatusMovedPermanently)
 			return
 		}
 
@@ -122,6 +131,25 @@ func stripPrefix(prefix string, h http.Handler) http.Handler {
 		*r2.URL = *r.URL
 		r2.URL.Path = p
 		r2.URL.RawPath = rp
-		h.ServeHTTP(w, r2)
+
+		// Remember what was taken off, in order, so a nested stripPrefix can
+		// rebuild an absolute path from the relative one it is handed.
+		h.ServeHTTP(w, r2.WithContext(withStrippedPrefix(r2.Context(), prefix)))
 	})
+}
+
+// strippedPrefixKey carries the request-scoped record of every prefix that has
+// been removed from the path on the way down to the current handler.
+type strippedPrefixKey struct{}
+
+// withStrippedPrefix appends one more stripped prefix to that record.
+func withStrippedPrefix(ctx context.Context, prefix string) context.Context {
+	return context.WithValue(ctx, strippedPrefixKey{}, strippedPrefix(ctx)+prefix)
+}
+
+// strippedPrefix is the base URL a request arrived under, as far as the
+// current handler is concerned — "" when there is none.
+func strippedPrefix(ctx context.Context) string {
+	v, _ := ctx.Value(strippedPrefixKey{}).(string)
+	return v
 }
